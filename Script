@@ -1,0 +1,190 @@
+import yfinance as yf
+import pandas as pd
+import logging
+from sqlalchemy import create_engine
+import mysql.connector
+import time
+from datetime import datetime
+from pytz import timezone
+
+# Setup Logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# DB Config
+DB_CONFIG = {
+    'user': 'root',
+    'password': 'root',
+    'host': 'localhost',
+    'database': 'IndianStocks'
+}
+
+# Connect to MySQL with retry
+def get_db_connection(max_retries=3, retry_delay=5):
+    for attempt in range(max_retries):
+        try:
+            return mysql.connector.connect(**DB_CONFIG)
+        except mysql.connector.Error as e:
+            logging.error(f"❌ DB connection failed: {e}. Retrying {attempt + 1}/{max_retries}...")
+            time.sleep(retry_delay)
+    logging.error("❌ Max retries reached. Could not connect to DB.")
+    return None
+
+# Get stock_id from stocks table
+def get_stock_id(ticker):
+    conn = get_db_connection()
+    if not conn:
+        return None
+    cursor = conn.cursor()
+    cursor.execute("SELECT stock_id FROM stocks WHERE ticker = %s", (ticker,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else None
+
+# Check existing timestamps in prices table
+def get_existing_timestamps(stock_id):
+    conn = get_db_connection()
+    if not conn:
+        return set()
+    cursor = conn.cursor()
+    cursor.execute("SELECT date FROM prices WHERE stock_id = %s", (stock_id,))
+    timestamps = {row[0] for row in cursor.fetchall()}
+    conn.close()
+    return timestamps
+
+# Insert data into prices table
+def insert_price_data(ticker, df):
+    stock_id = get_stock_id(ticker)
+    if not stock_id:
+        logging.error(f"❌ Stock ID not found for {ticker}")
+        return
+
+    df = df.dropna(subset=["Open", "High", "Low", "Close"])
+
+    existing_timestamps = get_existing_timestamps(stock_id)
+    data_to_insert = []
+    ist = timezone('Asia/Kolkata')
+
+    for index, row in df.iterrows():
+        try:
+            date = pd.to_datetime(index).astimezone(ist)
+            if date in existing_timestamps:
+                continue  # Skip duplicates
+            open_val = row['Open'].item() if hasattr(row['Open'], "item") else float(row['Open'])
+            high_val = row['High'].item() if hasattr(row['High'], "item") else float(row['High'])
+            low_val = row['Low'].item() if hasattr(row['Low'], "item") else float(row['Low'])
+            close_val = row['Close'].item() if hasattr(row['Close'], "item") else float(row['Close'])
+            volume_val = int(row['Volume']) if pd.notna(row['Volume']) else 0
+
+            data_to_insert.append((
+                stock_id,
+                date,
+                open_val,
+                high_val,
+                low_val,
+                close_val,
+                volume_val
+            ))
+        except Exception as e:
+            logging.error(f"❌ Error processing row for {ticker}: {e} | Row: {row.to_dict()}")
+            continue
+
+    if data_to_insert:
+        conn = get_db_connection()
+        if conn:
+            cursor = conn.cursor()
+            try:
+                cursor.executemany("""
+                    INSERT INTO prices (stock_id, date, open, high, low, close, volume)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, data_to_insert)
+                conn.commit()
+                logging.info(f"✅ Inserted {len(data_to_insert)} rows into prices for {ticker}")
+            except Exception as e:
+                logging.error(f"❌ Error inserting price data for {ticker}: {e}")
+            conn.close()
+        else:
+            logging.error(f"❌ No DB connection for inserting price data for {ticker}")
+
+# Insert data into transactions table
+def insert_transaction_data(ticker, df):
+    stock_id = get_stock_id(ticker)
+    if not stock_id:
+        logging.error(f"❌ Stock ID not found for {ticker}")
+        return
+
+    df = df.dropna(subset=["Close", "Volume"])
+
+    data_to_insert = []
+    ist = timezone('Asia/Kolkata')
+
+    for index, row in df.iterrows():
+        try:
+            txn_time = pd.to_datetime(index).astimezone(ist)
+            price_val = row['Close'].item() if hasattr(row['Close'], "item") else float(row['Close'])
+            quantity_val = int(row['Volume']) if pd.notna(row['Volume']) else 0
+            txn_type = "BUY"  # Placeholder
+
+            data_to_insert.append((
+                stock_id,
+                txn_time,
+                txn_type,
+                quantity_val,
+                price_val
+            ))
+        except Exception as e:
+            logging.error(f"❌ Error processing transaction row for {ticker}: {e} | Row: {row.to_dict()}")
+            continue
+
+    if data_to_insert:
+        conn = get_db_connection()
+        if conn:
+            cursor = conn.cursor()
+            try:
+                cursor.executemany("""
+                    INSERT INTO transactions (stock_id, txn_time, txn_type, quantity, price)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, data_to_insert)
+                conn.commit()
+                logging.info(f"✅ Inserted {len(data_to_insert)} rows into transactions for {ticker}")
+            except Exception as e:
+                logging.error(f"❌ Error inserting transaction data for {ticker}: {e}")
+            conn.close()
+        else:
+            logging.error(f"❌ No DB connection for inserting transaction data for {ticker}")
+
+# Fetch stock data from Yahoo Finance
+def fetch_stock_data(ticker):
+    try:
+        logging.info(f"📥 Fetching data for {ticker}")
+        df = yf.download(ticker, period="1d", interval="1m", progress=False, auto_adjust=False)
+
+        if df.empty:
+            logging.warning(f"⚠️ No data returned for {ticker}")
+            return pd.DataFrame()
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [col[0] for col in df.columns]
+
+        required = {"Open", "High", "Low", "Close", "Volume"}
+        if not required.issubset(df.columns):
+            logging.warning(f"⚠️ Missing required columns for {ticker}: {df.columns.tolist()}")
+            return pd.DataFrame()
+
+        return df
+    except Exception as e:
+        logging.error(f"❌ Error fetching data for {ticker}: {e}")
+        return pd.DataFrame()
+
+# MAIN - Loop every 1 minute
+if __name__ == "__main__":
+    tickers = ["RELIANCE.NS", "TCS.NS", "INFY.NS"]
+
+    while True:
+        logging.info("🕒 Starting new fetch cycle...")
+        for ticker in tickers:
+            df = fetch_stock_data(ticker)
+            if not df.empty:
+                insert_price_data(ticker, df)
+                insert_transaction_data(ticker, df)
+        logging.info("✅ Cycle complete. Sleeping for 60 seconds...\n")
+        time.sleep(60)
