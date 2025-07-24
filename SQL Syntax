@@ -1,0 +1,585 @@
+Create database Indianstocks;
+
+-- ✅ Use the correct database
+USE IndianStocks;
+
+-- 🔁 Drop existing tables if re-running
+DROP TABLE IF EXISTS prices;
+DROP TABLE IF EXISTS transactions;
+DROP TABLE IF EXISTS exchange_rates;
+DROP TABLE IF EXISTS stocks;
+
+-- 📦 1. stocks table
+CREATE TABLE stocks (
+    stock_id INT AUTO_INCREMENT PRIMARY KEY,
+    ticker VARCHAR(15) NOT NULL UNIQUE,        -- RELIANCE.NS, etc.
+    company_name VARCHAR(255) NOT NULL,
+    exchange ENUM('NSE', 'BSE') NOT NULL,
+    sector VARCHAR(100),
+    currency VARCHAR(5) DEFAULT 'INR',
+    is_active BOOLEAN DEFAULT TRUE,
+
+    INDEX idx_ticker (ticker)
+);
+
+-- 📦 2. prices table
+CREATE TABLE prices (
+    price_id INT AUTO_INCREMENT PRIMARY KEY,
+    stock_id INT NOT NULL,
+    timestamp DATETIME NOT NULL,
+    open FLOAT,
+    high FLOAT,
+    low FLOAT,
+    close FLOAT,
+    volume BIGINT,
+
+    CONSTRAINT fk_stock_price FOREIGN KEY (stock_id) REFERENCES stocks(stock_id),
+    UNIQUE KEY unique_stock_timestamp (stock_id, timestamp)
+);
+
+-- 📦 3. transactions table
+CREATE TABLE transactions (
+    txn_id INT AUTO_INCREMENT PRIMARY KEY,
+    stock_id INT NOT NULL,
+    txn_time DATETIME NOT NULL,
+    txn_type ENUM('BUY', 'SELL') NOT NULL,
+    quantity INT,
+    price FLOAT,
+
+    CONSTRAINT fk_stock_txn FOREIGN KEY (stock_id) REFERENCES stocks(stock_id)
+);
+
+-- 📦 4. exchange_rates table
+CREATE TABLE exchange_rates (
+    rate_id INT AUTO_INCREMENT PRIMARY KEY,
+    base_currency VARCHAR(5) NOT NULL,   -- e.g., USD
+    target_currency VARCHAR(5) NOT NULL, -- e.g., INR
+    rate FLOAT NOT NULL,
+    timestamp DATETIME NOT NULL,
+
+    INDEX idx_currency_pair (base_currency, target_currency, timestamp)
+);
+
+-- Inserting Data into Table
+
+INSERT INTO stocks (ticker, company_name, exchange, sector, currency, is_active) VALUES
+("RELIANCE.NS", "Reliance Industries Ltd", "NSE", "Energy & Conglomerate", "INR", TRUE),
+("TCS.NS", "Tata Consultancy Services", "NSE", "Information Technology", "INR", TRUE),
+("INFY.NS", "Infosys Limited", "NSE", "Information Technology", "INR", TRUE);
+
+select count(*) from prices;
+select * from prices
+order by date desc;
+
+select * from stocks;
+
+select * from transactions;
+select count(*) from transactions;
+
+-- Insight 1: Daily Stock Performance (Percentage Change in Close Price)
+-- Purpose: Measure daily price movement for each stock to assess volatility and performance.
+SELECT 
+    p.stock_id,
+    s.ticker,
+    DATE(p.date) AS trade_date,
+    MIN(p.date) AS first_timestamp,
+    MAX(p.date) AS last_timestamp,
+    MIN(p.close) AS day_open,
+    MAX(p.close) AS day_close,
+    ((MAX(p.close) - MIN(p.close)) / MIN(p.close) * 100) AS daily_pct_change
+FROM prices p
+JOIN stocks s ON p.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+GROUP BY p.stock_id, s.ticker, DATE(p.date)
+ORDER BY trade_date DESC, daily_pct_change DESC;
+
+-- Insight 2: Stock Performance Over Time (Monthly Average Close Price)
+-- Purpose: Track long-term price trends for each stock (e.g., monthly averages).
+SELECT 
+    s.ticker,
+    YEAR(p.date) AS year,
+    MONTH(p.date) AS month,
+    AVG(p.close) AS avg_close_price,
+    MIN(p.low) AS min_price,
+    MAX(p.high) AS max_price
+FROM prices p
+JOIN stocks s ON p.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+GROUP BY s.ticker, YEAR(p.date), MONTH(p.date)
+ORDER BY s.ticker, year, month;
+
+-- Insight 3: Stock Comparison (Daily Close Price Correlation)
+-- Purpose: Compare price movements between stocks to identify correlated behavior.
+SELECT 
+    s1.ticker AS stock1,
+    s2.ticker AS stock2,
+    DATE(p1.date) AS trade_date,
+    AVG(p1.close * p2.close) - AVG(p1.close) * AVG(p2.close) AS covariance,
+    STDDEV(p1.close) * STDDEV(p2.close) AS stddev_product,
+    (AVG(p1.close * p2.close) - AVG(p1.close) * AVG(p2.close)) / (STDDEV(p1.close) * STDDEV(p2.close)) AS correlation
+FROM prices p1
+JOIN prices p2 ON DATE(p1.date) = DATE(p2.date) AND p1.stock_id != p2.stock_id
+JOIN stocks s1 ON p1.stock_id = s1.stock_id
+JOIN stocks s2 ON p2.stock_id = s2.stock_id
+WHERE s1.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+  AND s2.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+GROUP BY s1.ticker, s2.ticker, DATE(p1.date)
+HAVING stddev_product > 0
+ORDER BY trade_date DESC, correlation DESC;
+
+-- Insight 4: Volume Analysis (Daily Trading Volume)
+-- Purpose: Identify high-activity days and compare trading volume across stocks.
+SELECT 
+    s.ticker,
+    DATE(p.date) AS trade_date,
+    SUM(p.volume) AS total_volume,
+    AVG(p.volume) AS avg_volume_per_minute
+FROM prices p
+JOIN stocks s ON p.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+GROUP BY s.ticker, DATE(p.date)
+ORDER BY trade_date DESC, total_volume DESC;
+
+-- Insight 5: Transaction Volume by Type
+-- Purpose: Analyze transaction activity (buy/sell) and total traded value.
+SELECT 
+    s.ticker,
+    DATE(t.txn_time) AS trade_date,
+    t.txn_type,
+    COUNT(t.txn_id) AS transaction_count,
+    SUM(t.quantity) AS total_quantity,
+    SUM(t.quantity * t.price) AS total_traded_value
+FROM transactions t
+JOIN stocks s ON t.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+GROUP BY s.ticker, DATE(t.txn_time), t.txn_type
+ORDER BY trade_date DESC, total_traded_value DESC;
+
+-- Insight 6: Transactions Per Second (TPS) Approximation
+-- Purpose: Estimate transaction frequency per minute (since data is 1-minute intervals).
+SELECT 
+    s.ticker,
+    DATE(t.txn_time) AS trade_date,
+    HOUR(t.txn_time) AS trade_hour,
+    COUNT(t.txn_id) / 60.0 AS transactions_per_second
+FROM transactions t
+JOIN stocks s ON t.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+GROUP BY s.ticker, DATE(t.txn_time), HOUR(t.txn_time)
+ORDER BY trade_date DESC, transactions_per_second DESC;
+
+-- Insight 7: Volatility (Daily Price Range)
+-- Purpose: Measure stock volatility using the daily high-low range.
+SELECT 
+    s.ticker,
+    DATE(p.date) AS trade_date,
+    (MAX(p.high) - MIN(p.low)) AS price_range,
+    ((MAX(p.high) - MIN(p.low)) / MIN(p.close) * 100) AS range_pct
+FROM prices p
+JOIN stocks s ON p.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+GROUP BY s.ticker, DATE(p.date)
+ORDER BY trade_date DESC, range_pct DESC;
+
+-- Insight 8: Moving Average (7-Day Simple Moving Average of Close Price)
+-- Purpose: Smooth out price data to identify trends over a week.
+SELECT 
+    s.ticker,
+    p.date,
+    p.close,
+    AVG(p.close) OVER (
+        PARTITION BY p.stock_id 
+        ORDER BY p.date 
+        ROWS BETWEEN 6*60 PRECEDING AND CURRENT ROW
+    ) AS sma_7day
+FROM prices p
+JOIN stocks s ON p.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+ORDER BY s.ticker, p.date DESC;
+
+-- Insight 9: High Activity Periods (Top 5 Minutes by Volume)
+-- Purpose: Identify peak trading times within a day.
+SELECT 
+    s.ticker,
+    p.date,
+    p.volume,
+    p.close
+FROM prices p
+JOIN stocks s ON p.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+  AND p.volume > 0
+ORDER BY p.volume DESC
+LIMIT 5;
+
+-- Insight 10: Transaction Value vs. Price Movement
+-- Purpose: Correlate transaction values with price changes to assess trading impact.
+SELECT 
+    s.ticker,
+    DATE(p.date) AS trade_date,
+    SUM(t.quantity * t.price) AS total_traded_value,
+    ((MAX(p.close) - MIN(p.close)) / MIN(p.close) * 100) AS daily_pct_change
+FROM prices p
+JOIN transactions t ON p.stock_id = t.stock_id AND DATE(p.date) = DATE(t.txn_time)
+JOIN stocks s ON p.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+GROUP BY s.ticker, DATE(p.date)
+ORDER BY trade_date DESC, total_traded_value DESC;
+
+-- Insight 11: Sector Performance Comparison
+-- Purpose: Compare average price performance across sectors to identify stronger sectors.
+SELECT 
+    s.sector,
+    DATE(p.date) AS trade_date,
+    AVG(p.close) AS avg_close_price,
+    ((MAX(p.close) - MIN(p.close)) / MIN(p.close) * 100) AS daily_pct_change,
+    SUM(p.volume) AS total_volume
+FROM prices p
+JOIN stocks s ON p.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+GROUP BY s.sector, DATE(p.date)
+ORDER BY trade_date DESC, daily_pct_change DESC;
+
+-- Insight 12: Intraday Price Movement (Hourly Volatility)
+-- Purpose: Analyze price volatility within trading hours to identify active periods.
+SELECT 
+    s.ticker,
+    DATE(p.date) AS trade_date,
+    HOUR(p.date) AS trade_hour,
+    AVG(p.close) AS avg_close,
+    (MAX(p.high) - MIN(p.low)) AS hourly_range,
+    ((MAX(p.high) - MIN(p.low)) / MIN(p.close) * 100) AS hourly_range_pct
+FROM prices p
+JOIN stocks s ON p.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+GROUP BY s.ticker, DATE(p.date), HOUR(p.date)
+ORDER BY trade_date DESC, hourly_range_pct DESC;
+
+-- Insight 13: Beta Coefficient (Relative to Market Index)
+-- Purpose: Measure stock risk relative to a market index (e.g., NIFTY 50).
+WITH market AS (
+    SELECT 
+        DATE(p.date) AS trade_date,
+        ((MAX(p.close) - MIN(p.close)) / MIN(p.close) * 100) AS market_pct_change
+    FROM prices p
+    JOIN stocks s ON p.stock_id = s.stock_id
+    WHERE s.ticker = '^NSEI' -- NIFTY 50 index
+    GROUP BY DATE(p.date)
+),
+stock AS (
+    SELECT 
+        s.ticker,
+        DATE(p.date) AS trade_date,
+        ((MAX(p.close) - MIN(p.close)) / MIN(p.close) * 100) AS stock_pct_change
+    FROM prices p
+    JOIN stocks s ON p.stock_id = s.stock_id
+    WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+    GROUP BY s.ticker, DATE(p.date)
+)
+SELECT 
+    stock.ticker,
+    stock.trade_date,
+    COVAR_POP(stock.stock_pct_change, market.market_pct_change) / VAR_POP(market.market_pct_change) AS beta
+FROM stock
+JOIN market ON stock.trade_date = market.trade_date
+WHERE VAR_POP(market.market_pct_change) > 0
+ORDER BY stock.ticker, stock.trade_date DESC;
+
+-- Insight 14: Trend Direction (Simple Momentum Indicator)
+-- Purpose: Identify bullish/bearish trends based on short-term vs. long-term moving averages.
+SELECT 
+    s.ticker,
+    p.date,
+    p.close,
+    AVG(p.close) OVER (
+        PARTITION BY p.stock_id 
+        ORDER BY p.date 
+        ROWS BETWEEN 6*60 PRECEDING AND CURRENT ROW
+    ) AS sma_7day,
+    AVG(p.close) OVER (
+        PARTITION BY p.stock_id 
+        ORDER BY p.date 
+        ROWS BETWEEN 20*60 PRECEDING AND CURRENT ROW
+    ) AS sma_20day,
+    CASE 
+        WHEN AVG(p.close) OVER (
+            PARTITION BY p.stock_id 
+            ORDER BY p.date 
+            ROWS BETWEEN 6*60 PRECEDING AND CURRENT ROW
+        ) > AVG(p.close) OVER (
+            PARTITION BY p.stock_id 
+            ORDER BY p.date 
+            ROWS BETWEEN 20*60 PRECEDING AND CURRENT ROW
+        ) THEN 'Bullish'
+        ELSE 'Bearish'
+    END AS trend
+FROM prices p
+JOIN stocks s ON p.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+ORDER BY s.ticker, p.date DESC;
+
+-- Insight 15: Portfolio Return (Weighted Average Return)
+-- Purpose: Calculate daily return for a hypothetical portfolio of the three stocks.
+SELECT 
+    DATE(p.date) AS trade_date,
+    SUM(((MAX(p.close) - MIN(p.close)) / MIN(p.close) * 100) * (1.0 / 3)) AS portfolio_return
+FROM prices p
+JOIN stocks s ON p.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+GROUP BY DATE(p.date)
+ORDER BY trade_date DESC;
+
+-- Creating View Tables for Power Bi Dashboard
+
+-- View 1: Daily Stock Performance
+CREATE VIEW daily_performance AS
+SELECT 
+    p.stock_id,
+    s.ticker,
+    DATE(p.date) AS trade_date,
+    MIN(p.date) AS first_timestamp,
+    MAX(p.date) AS last_timestamp,
+    MIN(p.close) AS day_open,
+    MAX(p.close) AS day_close,
+    ((MAX(p.close) - MIN(p.close)) / MIN(p.close) * 100) AS daily_pct_change
+FROM prices p
+JOIN stocks s ON p.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+GROUP BY p.stock_id, s.ticker, DATE(p.date)
+ORDER BY trade_date DESC, daily_pct_change DESC;
+
+-- View 2: Stock Performance Over Time
+CREATE VIEW stock_performance_over_time AS
+SELECT 
+    s.ticker,
+    YEAR(p.date) AS year,
+    MONTH(p.date) AS month,
+    AVG(p.close) AS avg_close_price,
+    MIN(p.low) AS min_price,
+    MAX(p.high) AS max_price
+FROM prices p
+JOIN stocks s ON p.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+GROUP BY s.ticker, YEAR(p.date), MONTH(p.date)
+ORDER BY s.ticker, year, month;
+
+-- View 3: Stock Comparison
+CREATE VIEW stock_comparison AS
+SELECT 
+    s1.ticker AS stock1,
+    s2.ticker AS stock2,
+    DATE(p1.date) AS trade_date,
+    AVG(p1.close * p2.close) - AVG(p1.close) * AVG(p2.close) AS covariance,
+    STDDEV(p1.close) * STDDEV(p2.close) AS stddev_product,
+    (AVG(p1.close * p2.close) - AVG(p1.close) * AVG(p2.close)) / (STDDEV(p1.close) * STDDEV(p2.close)) AS correlation
+FROM prices p1
+JOIN prices p2 ON DATE(p1.date) = DATE(p2.date) AND p1.stock_id != p2.stock_id
+JOIN stocks s1 ON p1.stock_id = s1.stock_id
+JOIN stocks s2 ON p2.stock_id = s2.stock_id
+WHERE s1.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+  AND s2.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+GROUP BY s1.ticker, s2.ticker, DATE(p1.date)
+HAVING stddev_product > 0
+ORDER BY trade_date DESC, correlation DESC;
+
+-- View 4: Volume Analysis
+CREATE VIEW volume_analysis AS
+SELECT 
+    s.ticker,
+    DATE(p.date) AS trade_date,
+    SUM(p.volume) AS total_volume,
+    AVG(p.volume) AS avg_volume_per_minute
+FROM prices p
+JOIN stocks s ON p.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+GROUP BY s.ticker, DATE(p.date)
+ORDER BY trade_date DESC, total_volume DESC;
+
+-- View 5: Transaction Volume by Type
+CREATE VIEW transaction_volume_by_type AS
+SELECT 
+    s.ticker,
+    DATE(t.txn_time) AS trade_date,
+    t.txn_type,
+    COUNT(t.txn_id) AS transaction_count,
+    SUM(t.quantity) AS total_quantity,
+    SUM(t.quantity * t.price) AS total_traded_value
+FROM transactions t
+JOIN stocks s ON t.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+GROUP BY s.ticker, DATE(t.txn_time), t.txn_type
+ORDER BY trade_date DESC, total_traded_value DESC;
+
+-- View 6: Transactions Per Second
+CREATE VIEW transactions_per_second AS
+SELECT 
+    s.ticker,
+    DATE(t.txn_time) AS trade_date,
+    HOUR(t.txn_time) AS trade_hour,
+    COUNT(t.txn_id) / 60.0 AS transactions_per_second
+FROM transactions t
+JOIN stocks s ON t.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+GROUP BY s.ticker, DATE(t.txn_time), HOUR(t.txn_time)
+ORDER BY trade_date DESC, transactions_per_second DESC;
+
+-- View 7: Volatility
+CREATE VIEW volatility AS
+SELECT 
+    s.ticker,
+    DATE(p.date) AS trade_date,
+    (MAX(p.high) - MIN(p.low)) AS price_range,
+    ((MAX(p.high) - MIN(p.low)) / MIN(p.close) * 100) AS range_pct
+FROM prices p
+JOIN stocks s ON p.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+GROUP BY s.ticker, DATE(p.date)
+ORDER BY trade_date DESC, range_pct DESC;
+
+-- View 8: Moving Average
+CREATE VIEW moving_average AS
+SELECT 
+    s.ticker,
+    p.date,
+    p.close,
+    AVG(p.close) OVER (
+        PARTITION BY p.stock_id 
+        ROWS BETWEEN 59 PRECEDING AND CURRENT ROW
+    ) AS sma_1hour
+FROM prices p
+JOIN stocks s ON p.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS');
+
+-- View 9: High Activity Periods
+CREATE VIEW high_activity_periods AS
+SELECT 
+    s.ticker,
+    p.date,
+    p.volume,
+    p.close
+FROM prices p
+JOIN stocks s ON p.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+  AND p.volume > 0
+ORDER BY p.volume DESC;
+
+-- View 10: Transaction Value vs. Price Movement
+CREATE VIEW transaction_value_vs_price AS
+SELECT 
+    s.ticker,
+    DATE(p.date) AS trade_date,
+    SUM(t.quantity * t.price) AS total_traded_value,
+    ((MAX(p.close) - MIN(p.close)) / MIN(p.close) * 100) AS daily_pct_change
+FROM prices p
+JOIN transactions t ON p.stock_id = t.stock_id AND DATE(p.date) = DATE(t.txn_time)
+JOIN stocks s ON p.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+GROUP BY s.ticker, DATE(p.date)
+ORDER BY trade_date DESC, total_traded_value DESC;
+
+-- View 11: Sector Performance Comparison
+CREATE VIEW sector_performance AS
+SELECT 
+    s.sector,
+    DATE(p.date) AS trade_date,
+    AVG(p.close) AS avg_close_price,
+    ((MAX(p.close) - MIN(p.close)) / MIN(p.close) * 100) AS daily_pct_change,
+    SUM(p.volume) AS total_volume
+FROM prices p
+JOIN stocks s ON p.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+GROUP BY s.sector, DATE(p.date)
+ORDER BY trade_date DESC, daily_pct_change DESC;
+
+-- View 12: Intraday Price Movement
+CREATE VIEW intraday_price_movement AS
+SELECT 
+    s.ticker,
+    DATE(p.date) AS trade_date,
+    HOUR(p.date) AS trade_hour,
+    AVG(p.close) AS avg_close,
+    (MAX(p.high) - MIN(p.low)) AS hourly_range,
+    ((MAX(p.high) - MIN(p.low)) / MIN(p.close) * 100) AS hourly_range_pct
+FROM prices p
+JOIN stocks s ON p.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+GROUP BY s.ticker, DATE(p.date), HOUR(p.date)
+ORDER BY trade_date DESC, hourly_range_pct DESC;
+
+-- View 13: Beta Coefficient
+CREATE VIEW beta_coefficient AS
+SELECT 
+    stock.ticker,
+    stock.trade_date,
+    (
+        (SUM(stock.stock_pct_change * market.market_pct_change) - SUM(stock.stock_pct_change) * SUM(market.market_pct_change) / COUNT(*)) / 
+        (COUNT(*) - 1)
+    ) / (
+        (SUM(POWER(market.market_pct_change, 2)) - POWER(SUM(market.market_pct_change), 2) / COUNT(*)) / (COUNT(*) - 1)
+    ) AS beta
+FROM (
+    SELECT 
+        s.ticker,
+        DATE(p.date) AS trade_date,
+        ((MAX(p.close) - MIN(p.close)) / MIN(p.close) * 100) AS stock_pct_change
+    FROM prices p
+    JOIN stocks s ON p.stock_id = s.stock_id
+    WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+    GROUP BY s.ticker, DATE(p.date)
+) AS stock
+JOIN (
+    SELECT 
+        DATE(p.date) AS trade_date,
+        ((MAX(p.close) - MIN(p.close)) / MIN(p.close) * 100) AS market_pct_change
+    FROM prices p
+    JOIN stocks s ON p.stock_id = s.stock_id
+    WHERE s.ticker = '^NSEI'
+    GROUP BY DATE(p.date)
+) AS market ON stock.trade_date = market.trade_date
+GROUP BY stock.ticker, stock.trade_date
+HAVING COUNT(*) > 1;
+
+-- View 14: Trend Direction
+CREATE VIEW trend_direction AS
+SELECT 
+    s.ticker,
+    p.date,
+    p.close,
+    AVG(p.close) OVER (
+        PARTITION BY p.stock_id 
+        ROWS BETWEEN 59 PRECEDING AND CURRENT ROW
+    ) AS sma_1hour,
+    AVG(p.close) OVER (
+        PARTITION BY p.stock_id 
+        ROWS BETWEEN 1199 PRECEDING AND CURRENT ROW
+    ) AS sma_20hour,
+    CASE 
+        WHEN AVG(p.close) OVER (
+            PARTITION BY p.stock_id 
+            ROWS BETWEEN 59 PRECEDING AND CURRENT ROW
+        ) > AVG(p.close) OVER (
+            PARTITION BY p.stock_id 
+            ROWS BETWEEN 1199 PRECEDING AND CURRENT ROW
+        ) THEN 'Bullish'
+        ELSE 'Bearish'
+    END AS trend
+FROM prices p
+JOIN stocks s ON p.stock_id = s.stock_id
+WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS');
+
+-- View 15: Portfolio Return
+CREATE VIEW portfolio_return AS
+SELECT 
+    trade_date,
+    AVG(daily_pct_change) * (1.0 / 3) AS portfolio_return
+FROM (
+    SELECT 
+        DATE(p.date) AS trade_date,
+        ((MAX(p.close) - MIN(p.close)) / MIN(p.close) * 100) AS daily_pct_change
+    FROM prices p
+    JOIN stocks s ON p.stock_id = s.stock_id
+    WHERE s.ticker IN ('RELIANCE.NS', 'TCS.NS', 'INFY.NS')
+    GROUP BY DATE(p.date), s.stock_id
+) AS daily_changes
+GROUP BY trade_date
+ORDER BY trade_date DESC;
+
